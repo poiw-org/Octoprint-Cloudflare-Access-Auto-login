@@ -1,0 +1,72 @@
+<div id="settings_plugin_cloudflare_access_sso" data-bind="with: settings.plugins.cloudflare_access_sso">
+  <div class="control-group">
+    <label class="control-label" for="cf_team_domain">Team Domain</label>
+    <div class="controls">
+      <input
+        type="text"
+        id="cf_team_domain"
+        class="input-block-level"
+        data-bind="value: team_domain"
+        placeholder="example.cloudflareaccess.com"
+      />
+      <span class="help-block">
+        Your Cloudflare Zero Trust team domain, e.g.
+        <code>example.cloudflareaccess.com</code>.
+      </span>
+    </div>
+  </div>
+
+  <div class="control-group">
+    <label class="control-label" for="cf_audience">Audience (AUD)</label>
+    <div class="controls">
+      <input
+        type="text"
+        id="cf_audience"
+        class="input-block-level"
+        data-bind="value: audience"
+        placeholder="Cloudflare Access application AUD tag"
+      />
+      <span class="help-block">
+        The Audience (AUD) tag of your Cloudflare Access application. You can
+        find this in
+        <strong>Zero Trust → Access → Applications → [Application] → Overview</strong>.
+      </span>
+    </div>
+  </div>
+
+  <div class="control-group">
+    <label class="control-label" for="cf_allowed_cidrs">Allowed CIDR ranges</label>
+    <div class="controls">
+      <textarea
+        id="cf_allowed_cidrs"
+        class="input-block-level"
+        rows="3"
+        data-bind="value: allowed_cidrs"
+        placeholder="e.g. 10.0.0.0/8, 192.168.0.0/16"
+      ></textarea>
+      <span class="help-block">
+        Optional list of CIDR ranges from which requests are allowed for SSO, in
+        addition to localhost. You may separate entries with commas, spaces or
+        new lines.
+      </span>
+    </div>
+  </div>
+
+  <div class="control-group">
+    <div class="controls">
+      <label class="checkbox" for="cf_allow_cloudflare_ips">
+        <input
+          type="checkbox"
+          id="cf_allow_cloudflare_ips"
+          data-bind="checked: allow_cloudflare_ips"
+        />
+        Allow Cloudflare IP ranges
+      </label>
+      <span class="help-block">
+        When enabled, the plugin fetches Cloudflare's official IPv4 and IPv6
+        ranges at startup and allows SSO for requests originating from those
+        networks.
+      </span>
+    </div>
+  </div>
+</div>
