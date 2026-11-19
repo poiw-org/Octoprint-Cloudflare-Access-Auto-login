@@ -63,10 +63,12 @@
         Sign in local connections without a Cloudflare token
       </label>
       <span class="help-block">
-        A visitor from one of the local networks below who has no Cloudflare
-        Access token is signed in as an existing OctoPrint user. Visitors
-        through Cloudflare still sign in as themselves. Logging out turns it
-        off for that browser until the next manual sign-in.
+        A visitor without a Cloudflare Access token whose address
+        (<code>X-Forwarded-For</code>) is the printer's own public IP, i.e.
+        someone in the lab, is signed in as an existing OctoPrint user. The
+        printer looks up its public IP every 5 minutes. Visitors with a token
+        still sign in as themselves. Logging out turns it off for that browser
+        until the next manual sign-in.
       </span>
     </div>
   </div>
@@ -81,25 +83,6 @@
         data-bind="value: local_autologin_as, enable: local_autologin"
         placeholder="An existing OctoPrint username"
       />
-    </div>
-  </div>
-
-  <div class="control-group">
-    <label class="control-label" for="cf_local_networks">Local networks</label>
-    <div class="controls">
-      <textarea
-        id="cf_local_networks"
-        class="input-block-level"
-        rows="3"
-        data-bind="value: local_networks, enable: local_autologin"
-        placeholder="127.0.0.0/8, ::1/128, 192.168.1.0/24"
-      ></textarea>
-      <span class="help-block">
-        Subnets that count as local, separated by commas, spaces or new lines.
-        Behind a reverse proxy this is the visitor's address from
-        <code>X-Forwarded-For</code>, so tunnel visitors don't match
-        <code>127.0.0.0/8</code>.
-      </span>
     </div>
   </div>
 

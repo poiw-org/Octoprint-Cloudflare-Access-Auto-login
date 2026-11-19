@@ -27,16 +27,18 @@ In OctoPrint:
 - If Cloudflare's proxy connects to OctoPrint directly (no tunnel), enable **Allow Cloudflare IP ranges**.
 
 - Set **Roles to groups**, one `role: group` per line (default `admin: admins` and `lab-access: users`). Leave it empty to manage groups in OctoPrint.
-- Optionally turn on **Sign in local connections without a Cloudflare token**, pick an existing OctoPrint **Local user**, and list the **Local networks** (default `127.0.0.0/8`, `::1/128`).
+- Optionally turn on **Sign in local connections without a Cloudflare token** and pick an existing OctoPrint **Local user**.
 
 Save and restart OctoPrint.
 
 ## Local sign-in without a token
 
-Requests from the local networks that carry no valid Cloudflare Access token are signed in as the local user. This is OctoPrint's own autologin (`accessControl.autologinLocal`, `autologinAs`, `localNetworks` in `config.yaml`); the plugin just puts those settings on its page.
+Requests that carry no valid Cloudflare Access token are signed in as the local user only when their address is the printer's own public IPv4 address, i.e. they come from the lab, behind the same NAT. This is OctoPrint's own autologin (`accessControl.autologinLocal`, `autologinAs`); the plugin looks up the public IP every 5 minutes (from `https://1.1.1.1/cdn-cgi/trace`) and sets `localNetworks` to that one address, overwriting any subnets there. Subnets can't be configured, so a whole organisation's network can't be let in.
 
 - A valid Access token always wins: the visitor signs in as themselves.
-- OctoPrint takes the client address from `X-Forwarded-For` when the request comes through a trusted proxy, so visitors through a `cloudflared` tunnel on the same machine show their own public IP and don't match `127.0.0.0/8`. Don't add a network your proxy forwards from without that header.
+- OctoPrint takes the client address from `X-Forwarded-For` when the request comes through a trusted proxy, so visitors through a `cloudflared` tunnel show their own public IP.
+- If the lookup fails, nobody is signed in this way until it succeeds again.
+- Visitors reaching Cloudflare over IPv6, or opening OctoPrint directly on the LAN (no `X-Forwarded-For`), don't match.
 - Logging out stops it for that browser until someone signs in by hand again.
 
 ## Roles to groups
