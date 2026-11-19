@@ -35,6 +35,28 @@
   </div>
 
   <div class="control-group">
+    <label class="control-label" for="cf_role_groups">Roles to groups</label>
+    <div class="controls">
+      <textarea
+        id="cf_role_groups"
+        class="input-block-level"
+        rows="3"
+        data-bind="value: role_groups"
+        placeholder="admin: admins"
+      ></textarea>
+      <span class="help-block">
+        One <code>role: group</code> per line. Each sign-in sets the user's
+        groups from the <code>roles</code> claim your identity provider sends
+        through Cloudflare Access (add <code>roles</code> under OIDC claims in
+        the Cloudflare identity provider). Roles not listed here give no group.
+        Use group keys such as <code>admins</code>, <code>users</code>,
+        <code>readonly</code> or <code>guests</code>. Leave empty to manage
+        groups in OctoPrint instead.
+      </span>
+    </div>
+  </div>
+
+  <div class="control-group">
     <label class="control-label" for="cf_allowed_cidrs">Allowed CIDR ranges</label>
     <div class="controls">
       <textarea

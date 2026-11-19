@@ -34,6 +34,8 @@ class CloudflareAccessSSOPlugin(
             "audience": "",
             "allowed_cidrs": "",
             "allow_cloudflare_ips": False,
+            # "role: group" per line. Empty turns group syncing off.
+            "role_groups": "admin: admins\nlab-access: users",
         }
 
     def on_settings_save(self, data: Dict[str, Any]) -> None:
@@ -75,9 +77,10 @@ class CloudflareAccessSSOPlugin(
 
     def _user_from_jwt(self):
         try:
-            email = self._verified_email()
-            if not email:
+            claims = self._verified_claims()
+            if not claims:
                 return None
+            email = claims["email"]
 
             users = octoprint.server.userManager
             user = users.find_user(userid=email)
@@ -89,7 +92,10 @@ class CloudflareAccessSSOPlugin(
                 except UserAlreadyExists:
                     pass  # another request created it first
                 user = users.find_user(userid=email)
-            if user is None or not user.is_active:
+            if user is None:
+                return None
+            self._sync_groups(email, claims)
+            if not user.is_active:
                 return None
 
             session["login_mechanism"] = LOGIN_MECHANISM
@@ -106,14 +112,41 @@ class CloudflareAccessSSOPlugin(
         if session.get("login_mechanism") != LOGIN_MECHANISM:
             return True
         try:
-            if self._verified_email() == userid:
+            claims = self._verified_claims()
+            if claims and claims["email"] == userid:
+                # Roles are fixed when the person signs in to Cloudflare Access; a new Access
+                # sign-in brings a new token, so keep the groups current within the session too.
+                self._sync_groups(userid, claims)
                 return True
         except Exception:
             self._logger.exception("Could not check the Cloudflare Access identity")
         server_side_logout(userid, sessionid=session.get("usersession.id"))
         return False
 
-    def _verified_email(self) -> Optional[str]:
+    def _sync_groups(self, userid: str, claims: Dict[str, Any]) -> None:
+        """Sets the user's OctoPrint groups from the token's `roles` claim, which Cloudflare passes
+        on from the identity provider under `custom`."""
+        mapping = {}
+        for line in (self._settings.get(["role_groups"]) or "").splitlines():
+            role, _, group = line.partition(":")
+            if role.strip() and group.strip():
+                mapping[role.strip()] = group.strip()
+        roles = (claims.get("custom") or {}).get("roles")
+        if not mapping or not isinstance(roles, list):
+            # Off, or Cloudflare left the claim out (it drops custom claims over ~1 KB):
+            # keep the groups as they are rather than take everyone's access away.
+            return
+
+        groups = sorted({mapping[role] for role in roles if role in mapping})
+        users = octoprint.server.userManager
+        user = users.find_user(userid=userid)
+        if user is None or sorted(g.key for g in user.groups) == groups:
+            return
+        users.change_user_groups(userid, groups)
+        self._logger.info("Set %s's groups to %s from roles %s", userid, groups, roles)
+
+    def _verified_claims(self) -> Optional[Dict[str, Any]]:
+        """The verified token's claims, with `email` present, or None."""
         token = request.headers.get(JWT_HEADER)
         if not token or not self._from_trusted_peer():
             return None
@@ -147,7 +180,7 @@ class CloudflareAccessSSOPlugin(
         if not isinstance(email, str) or not email.strip():
             self._logger.warning("Cloudflare Access token has no email; service tokens can't sign in")
             return None
-        return email.strip()
+        return {**claims, "email": email.strip()}
 
     # ---- Network configuration ------------------------------------------
 

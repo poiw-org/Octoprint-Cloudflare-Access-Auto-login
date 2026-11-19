@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "OctoPrint-Cloudflare-Access-SSO"
-version = "0.2.0"
+version = "0.3.0"
 description = "Signs people in to OctoPrint with the Cloudflare Access JWT, creating their account on first visit."
 license = "AGPL-3.0-only"
 readme = { file = "README.md", content-type = "text/markdown" }
