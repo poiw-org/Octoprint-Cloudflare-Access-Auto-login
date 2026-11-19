@@ -38,7 +38,34 @@ class CloudflareAccessSSOPlugin(
             "role_groups": "admin: admins\nlab-access: users",
         }
 
+    # Local sign-in without a token is OctoPrint's own autologin (accessControl.autologinLocal),
+    # which only runs when nobody is signed in, so a valid Access token always wins, and which
+    # respects logging out. The plugin only gives its settings a page; OctoPrint has none for them.
+    def on_settings_load(self) -> Dict[str, Any]:
+        data = octoprint.plugin.SettingsPlugin.on_settings_load(self)
+        data["local_autologin"] = self._settings.global_get_boolean(["accessControl", "autologinLocal"])
+        data["local_autologin_as"] = self._settings.global_get(["accessControl", "autologinAs"]) or ""
+        data["local_networks"] = "\n".join(
+            self._settings.global_get(["accessControl", "localNetworks"]) or []
+        )
+        return data
+
     def on_settings_save(self, data: Dict[str, Any]) -> None:
+        if "local_autologin" in data:
+            self._settings.global_set_boolean(
+                ["accessControl", "autologinLocal"], bool(data.pop("local_autologin"))
+            )
+        if "local_autologin_as" in data:
+            username = (data.pop("local_autologin_as") or "").strip()
+            if username and octoprint.server.userManager.find_user(userid=username) is None:
+                self._logger.warning("Local sign-in user %s doesn't exist in OctoPrint", username)
+            self._settings.global_set(["accessControl", "autologinAs"], username or None)
+        if "local_networks" in data:
+            networks = [str(net) for net in self._parse_networks(data.pop("local_networks") or "")]
+            self._settings.global_set(["accessControl", "localNetworks"], networks)
+            # OctoPrint parses localNetworks once; drop its copy so the change applies without a restart.
+            octoprint.server.util.flask._cached_local_networks = None
+
         octoprint.plugin.SettingsPlugin.on_settings_save(self, data)
         self._jwks = None
         self._load_network_configuration()

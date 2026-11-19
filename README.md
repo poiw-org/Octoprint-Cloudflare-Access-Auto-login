@@ -27,8 +27,17 @@ In OctoPrint:
 - If Cloudflare's proxy connects to OctoPrint directly (no tunnel), enable **Allow Cloudflare IP ranges**.
 
 - Set **Roles to groups**, one `role: group` per line (default `admin: admins` and `lab-access: users`). Leave it empty to manage groups in OctoPrint.
+- Optionally turn on **Sign in local connections without a Cloudflare token**, pick an existing OctoPrint **Local user**, and list the **Local networks** (default `127.0.0.0/8`, `::1/128`).
 
 Save and restart OctoPrint.
+
+## Local sign-in without a token
+
+Requests from the local networks that carry no valid Cloudflare Access token are signed in as the local user. This is OctoPrint's own autologin (`accessControl.autologinLocal`, `autologinAs`, `localNetworks` in `config.yaml`); the plugin just puts those settings on its page.
+
+- A valid Access token always wins: the visitor signs in as themselves.
+- OctoPrint takes the client address from `X-Forwarded-For` when the request comes through a trusted proxy, so visitors through a `cloudflared` tunnel on the same machine show their own public IP and don't match `127.0.0.0/8`. Don't add a network your proxy forwards from without that header.
+- Logging out stops it for that browser until someone signs in by hand again.
 
 ## Roles to groups
 
