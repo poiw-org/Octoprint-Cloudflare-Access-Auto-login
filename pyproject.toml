@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "OctoPrint-Cloudflare-Access-SSO"
+version = "0.2.0"
+description = "Signs people in to OctoPrint with the Cloudflare Access JWT, creating their account on first visit."
+license = "AGPL-3.0-only"
+readme = { file = "README.md", content-type = "text/markdown" }
+requires-python = ">=3.9,<4"
+dependencies = ["OctoPrint>=2.0.0", "PyJWT[crypto]>=2.8.0", "requests>=2.31.0"]
+
+[project.urls]
+Homepage = "https://github.com/donfn/Octoprint-Cloudflare-Access-Auto-login"
+
+[project.entry-points."octoprint.plugin"]
+cloudflare_access_sso = "octoprint_cloudflare_access_sso"
+
+[tool.setuptools.packages.find]
+include = ["octoprint_cloudflare_access_sso", "octoprint_cloudflare_access_sso.*"]
+
+[tool.setuptools.package-data]
+octoprint_cloudflare_access_sso = ["templates/*"]

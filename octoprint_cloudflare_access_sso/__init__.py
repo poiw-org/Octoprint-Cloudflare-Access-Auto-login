@@ -1,27 +1,30 @@
 import ipaddress
-import logging
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 import jwt
 import requests
-from flask import request
-from flask_login import login_user
+from flask import request, session
 
 import octoprint.plugin
-from octoprint.server import userManager
+import octoprint.server
+from octoprint.access.users import UserAlreadyExists
+from octoprint.server.util.flask import server_side_logout
+
+JWT_HEADER = "Cf-Access-Jwt-Assertion"
+# Stored in the session like OctoPrint's own login mechanisms (password, apikey, remote_user).
+LOGIN_MECHANISM = "cloudflare_access"
 
 
 class CloudflareAccessSSOPlugin(
     octoprint.plugin.StartupPlugin,
     octoprint.plugin.SettingsPlugin,
     octoprint.plugin.TemplatePlugin,
-    octoprint.plugin.AssetPlugin,
 ):
     def __init__(self) -> None:
-        self._logger = logging.getLogger("octoprint.plugins.cloudflare_access_sso")
-        self._jwks_cache: Optional[Dict[str, Any]] = None
-        self._allowed_networks: List[ipaddress._BaseNetwork] = []
-        self._cloudflare_networks: List[ipaddress._BaseNetwork] = []
+        self._jwks: Optional[jwt.PyJWKClient] = None
+        self._allowed_networks: List[Any] = []
+        self._cloudflare_networks: List[Any] = []
 
     ##~~ SettingsPlugin mixin
 
@@ -35,313 +38,172 @@ class CloudflareAccessSSOPlugin(
 
     def on_settings_save(self, data: Dict[str, Any]) -> None:
         octoprint.plugin.SettingsPlugin.on_settings_save(self, data)
+        self._jwks = None
         self._load_network_configuration()
 
     ##~~ TemplatePlugin mixin
 
     def get_template_configs(self):
         return [
-            dict(
-                type="settings",
-                custom_bindings=True,
-                name="Cloudflare Access SSO",
-                template="cloudflare_access_sso_settings.jinja2",
-            )
+            {
+                "type": "settings",
+                "name": "Cloudflare Access SSO",
+                "template": "cloudflare_access_sso_settings.jinja2",
+                "custom_bindings": False,
+            }
         ]
 
-    ##~~ AssetPlugin mixin
-
-    def get_assets(self):
-        return {
-            "js": ["js/cloudflare_access_sso.js"],
-        }
+    def is_template_autoescaped(self):
+        return True
 
     ##~~ StartupPlugin mixin
 
-    def on_after_startup(self):
-        self._logger.info("Cloudflare Access SSO plugin initialized")
-
-        flask_app = self._plugin_manager.get_plugin("octoprint").implementation._app
-        # Register a before_request handler that runs early
-        flask_app.before_request(self._handle_before_request)
+    def on_startup(self, host, port):
+        # Plug into OctoPrint's own login manager, after its API key, Basic Auth and remote user
+        # header checks. Flask no longer lets plugins add app-wide before_request handlers once
+        # the server runs, and a loader is how OctoPrint itself signs in proxy-authenticated users.
+        login_manager = octoprint.server.loginManager
+        from_request = login_manager._request_callback
+        from_session = login_manager._user_callback
+        login_manager.request_loader(lambda req: from_request(req) or self._user_from_jwt())
+        login_manager.user_loader(
+            lambda userid: from_session(userid) if self._session_still_valid(userid) else None
+        )
         self._load_network_configuration()
 
-    # ---- Core SSO logic -------------------------------------------------
+    # ---- Sign-in --------------------------------------------------------
 
-    def _handle_before_request(self):
+    def _user_from_jwt(self):
         try:
-            self._process_request()
-        except Exception as exc:  # noqa: BLE001
-            self._logger.exception(
-                "Unexpected error while processing Cloudflare Access SSO: %s", exc
-            )
+            email = self._verified_email()
+            if not email:
+                return None
 
-    def _process_request(self) -> None:
-        # 1. Extract JWT from Cloudflare header
-        token = request.headers.get("Cf-Access-Jwt-Assertion")
-        if not token:
-            # No Cloudflare JWT present: fall back to OctoPrint's default behaviour
-            return
+            users = octoprint.server.userManager
+            user = users.find_user(userid=email)
+            if user is None:
+                try:
+                    # No password: this user can only sign in through Cloudflare Access.
+                    users.add_user(email, None, active=True)
+                    self._logger.info("Created OctoPrint user %s from Cloudflare Access", email)
+                except UserAlreadyExists:
+                    pass  # another request created it first
+                user = users.find_user(userid=email)
+            if user is None or not user.is_active:
+                return None
 
-        # 2. Enforce request origin only when we are handling a Cloudflare JWT
-        remote_addr = request.remote_addr
-        if not self._is_request_ip_allowed(remote_addr):
-            return
+            session["login_mechanism"] = LOGIN_MECHANISM
+            session["credentials_seen"] = datetime.now().timestamp()
+            return user
+        except Exception:
+            # Never break the request: OctoPrint's normal login still works.
+            self._logger.exception("Cloudflare Access sign-in failed")
+            return None
 
-        team_domain = self._settings.get(["team_domain"]).strip()
-        audience = self._settings.get(["audience"]).strip()
+    def _session_still_valid(self, userid: str) -> bool:
+        """A session this plugin started ends once the request's Access identity no longer matches,
+        the same way OctoPrint treats its remote user header (OctoPrint issue #5279)."""
+        if session.get("login_mechanism") != LOGIN_MECHANISM:
+            return True
+        try:
+            if self._verified_email() == userid:
+                return True
+        except Exception:
+            self._logger.exception("Could not check the Cloudflare Access identity")
+        server_side_logout(userid, sessionid=session.get("usersession.id"))
+        return False
 
+    def _verified_email(self) -> Optional[str]:
+        token = request.headers.get(JWT_HEADER)
+        if not token or not self._from_trusted_peer():
+            return None
+
+        team_domain = (self._settings.get(["team_domain"]) or "").strip()
+        team_domain = team_domain.removeprefix("https://").rstrip("/")
+        audience = (self._settings.get(["audience"]) or "").strip()
         if not team_domain or not audience:
-            self._logger.debug(
-                "Cloudflare Access SSO not configured (team_domain/audience missing)"
+            self._logger.debug("Cloudflare Access SSO is not configured")
+            return None
+
+        if self._jwks is None:
+            # Caches Cloudflare's keys and refetches when a token names a key it hasn't seen,
+            # so key rotation needs no restart.
+            self._jwks = jwt.PyJWKClient(f"https://{team_domain}/cdn-cgi/access/certs", timeout=5)
+        try:
+            key = self._jwks.get_signing_key_from_jwt(token)
+            claims = jwt.decode(
+                token,
+                key.key,
+                algorithms=["RS256"],
+                audience=audience,
+                issuer=f"https://{team_domain}",
+                options={"require": ["exp", "iat", "aud", "iss"]},
             )
-            return
+        except jwt.PyJWTError as exc:
+            self._logger.warning("Rejected Cloudflare Access token: %s", exc)
+            return None
 
-        payload = self._verify_jwt(token, team_domain=team_domain, audience=audience)
-        if not payload:
-            return
+        email = claims.get("email")
+        if not isinstance(email, str) or not email.strip():
+            self._logger.warning("Cloudflare Access token has no email; service tokens can't sign in")
+            return None
+        return email.strip()
 
-        email = payload.get("email")
-        name = payload.get("name")
-
-        if not email:
-            self._logger.warning(
-                "Cloudflare Access JWT is missing 'email' claim; cannot authenticate user"
-            )
-            return
-
-        self._ensure_and_login_user(username=email, full_name=name)
-
-    # ---- Network configuration & validation ------------------------------
+    # ---- Network configuration ------------------------------------------
 
     def _load_network_configuration(self) -> None:
         """Parse user-defined CIDRs and, if enabled, fetch Cloudflare IP ranges."""
-        cidr_text = (self._settings.get(["allowed_cidrs"]) or "").strip()
-        self._allowed_networks = self._parse_networks_from_text(cidr_text)
-
-        if self._settings.get_boolean(["allow_cloudflare_ips"]):
-            self._cloudflare_networks = self._fetch_cloudflare_networks()
-        else:
-            self._cloudflare_networks = []
-
+        self._allowed_networks = self._parse_networks(self._settings.get(["allowed_cidrs"]) or "")
+        self._cloudflare_networks = (
+            self._fetch_cloudflare_networks()
+            if self._settings.get_boolean(["allow_cloudflare_ips"])
+            else []
+        )
         self._logger.info(
             "Cloudflare Access SSO network config: %d user CIDR(s), %d Cloudflare CIDR(s)",
             len(self._allowed_networks),
             len(self._cloudflare_networks),
         )
 
-    def _parse_networks_from_text(
-        self, text: str
-    ) -> List[ipaddress._BaseNetwork]:
-        networks: List[ipaddress._BaseNetwork] = []
-        if not text:
-            return networks
-
-        # Allow comma, space, or newline separated CIDRs
-        raw_items = []
-        for part in text.replace(",", " ").split():
-            item = part.strip()
-            if item:
-                raw_items.append(item)
-
-        for cidr in raw_items:
+    def _parse_networks(self, text: str) -> List[Any]:
+        networks = []
+        # Comma, space or newline separated
+        for cidr in text.replace(",", " ").split():
             try:
-                net = ipaddress.ip_network(cidr, strict=False)
-                networks.append(net)
+                networks.append(ipaddress.ip_network(cidr, strict=False))
             except ValueError:
-                self._logger.warning(
-                    "Ignoring invalid CIDR '%s' in Cloudflare Access SSO settings",
-                    cidr,
-                )
-
+                self._logger.warning("Ignoring invalid CIDR '%s' in Cloudflare Access SSO settings", cidr)
         return networks
 
-    def _is_request_ip_allowed(self, remote_addr: Optional[str]) -> bool:
-        if not remote_addr:
-            return False
-
+    def _from_trusted_peer(self) -> bool:
+        # The peer that connected to OctoPrint (cloudflared, or Cloudflare's edge), not the client
+        # address OctoPrint reads from X-Forwarded-For, which cloudflared sets to the visitor's IP.
+        peer = request.environ.get("ORIG_REMOTE_ADDR") or request.remote_addr
         try:
-            ip = ipaddress.ip_address(remote_addr)
-        except ValueError:
-            self._logger.warning(
-                "Received invalid remote_addr '%s', rejecting for SSO", remote_addr
-            )
+            ip = ipaddress.ip_address(peer)
+        except (TypeError, ValueError):
             return False
+        return ip.is_loopback or any(
+            ip in net for net in self._allowed_networks + self._cloudflare_networks
+        )
 
-        # Always allow loopback to preserve previous behavior
-        if ip.is_loopback:
-            return True
-
-        for net in self._allowed_networks:
-            if ip in net:
-                return True
-
-        for net in self._cloudflare_networks:
-            if ip in net:
-                return True
-
-        return False
-
-    def _fetch_jwks(self, team_domain: str) -> Optional[Dict[str, Any]]:
-        if self._jwks_cache is not None:
-            return self._jwks_cache
-
-        jwks_url = f"https://{team_domain}/cdn-cgi/access/certs"
-        try:
-            resp = requests.get(jwks_url, timeout=5)
-            resp.raise_for_status()
-            data = resp.json()
-            if not isinstance(data, dict) or "keys" not in data:
-                self._logger.warning(
-                    "Unexpected JWKS response from Cloudflare: %r", data
-                )
-                return None
-            self._jwks_cache = data
-            return data
-        except Exception as exc:  # noqa: BLE001
-            self._logger.warning(
-                "Failed to fetch Cloudflare JWKS from %s: %s", jwks_url, exc
-            )
-            return None
-
-    def _fetch_cloudflare_networks(self) -> List[ipaddress._BaseNetwork]:
-        """Fetch and cache Cloudflare IPv4/IPv6 CIDR ranges."""
+    def _fetch_cloudflare_networks(self) -> List[Any]:
         url = "https://api.cloudflare.com/client/v4/ips"
-        networks: List[ipaddress._BaseNetwork] = []
-
         try:
             resp = requests.get(url, timeout=5)
             resp.raise_for_status()
-            data = resp.json()
-
-            cidrs: List[str] = []
-            result = data.get("result") if isinstance(data, dict) else None
-            if isinstance(result, dict):
-                cidrs.extend(result.get("ipv4_cidrs", []) or [])
-                cidrs.extend(result.get("ipv6_cidrs", []) or [])
-            else:
-                # Fallback if Cloudflare returns flat structure
-                cidrs.extend(data.get("ipv4_cidrs", []) or [])
-                cidrs.extend(data.get("ipv6_cidrs", []) or [])
-
-            for cidr in cidrs:
-                try:
-                    networks.append(ipaddress.ip_network(cidr, strict=False))
-                except ValueError:
-                    self._logger.warning(
-                        "Ignoring invalid Cloudflare CIDR '%s' from %s", cidr, url
-                    )
-
-            self._logger.info(
-                "Loaded %d Cloudflare IP CIDR(s) from %s", len(networks), url
-            )
-        except Exception as exc:  # noqa: BLE001
-            self._logger.warning(
-                "Failed to fetch Cloudflare IP ranges from %s: %s", url, exc
-            )
-
-        return networks
-
-    def _verify_jwt(
-        self, token: str, team_domain: str, audience: str
-    ) -> Optional[Dict[str, Any]]:
-        try:
-            unverified_header = jwt.get_unverified_header(token)
-        except jwt.InvalidTokenError as exc:
-            self._logger.warning(
-                "Invalid Cloudflare Access JWT header, aborting authentication: %s",
-                exc,
-            )
-            return None
-
-        kid = unverified_header.get("kid")
-        if not kid:
-            self._logger.warning(
-                "Cloudflare Access JWT missing 'kid' header, aborting authentication"
-            )
-            return None
-
-        jwks = self._fetch_jwks(team_domain)
-        if not jwks:
-            return None
-
-        key_data = None
-        for key in jwks.get("keys", []):
-            if key.get("kid") == kid:
-                key_data = key
-                break
-
-        if not key_data:
-            self._logger.warning(
-                "No matching JWK found for kid=%s in Cloudflare JWKS", kid
-            )
-            return None
-
-        try:
-            public_key = jwt.algorithms.RSAAlgorithm.from_jwk(key_data)
-            payload = jwt.decode(
-                token,
-                key=public_key,
-                audience=audience,
-                issuer=f"https://{team_domain}",
-                algorithms=["RS256"],
-            )
-            return payload
-        except jwt.ExpiredSignatureError:
-            self._logger.info("Cloudflare Access JWT has expired")
-        except jwt.InvalidTokenError as exc:
-            self._logger.warning(
-                "Failed to validate Cloudflare Access JWT: %s", exc
-            )
-
-        return None
-
-    def _ensure_and_login_user(self, username: str, full_name: Optional[str]) -> None:
-        try:
-            user = userManager.findUser(username)
-        except Exception:  # noqa: BLE001
-            user = None
-
-        if user is None:
-            try:
-                user = userManager.addUser(
-                    username,
-                    password="",
-                    active=True,
-                    roles=["operator"],
-                    name=full_name or username,
-                )
-                self._logger.info(
-                    "Created new OctoPrint user '%s' with operator role "
-                    "via Cloudflare Access SSO",
-                    username,
-                )
-            except Exception as exc:  # noqa: BLE001
-                self._logger.warning(
-                    "Failed to create OctoPrint user '%s' from Cloudflare Access JWT: %s",
-                    username,
-                    exc,
-                )
-                return
-
-        try:
-            login_user(user, remember=False)
-            self._logger.debug(
-                "Authenticated user '%s' via Cloudflare Access SSO", username
-            )
-        except Exception as exc:  # noqa: BLE001
-            self._logger.warning(
-                "Failed to log in user '%s' via Cloudflare Access SSO: %s",
-                username,
-                exc,
-            )
+            result = resp.json().get("result") or {}
+            cidrs = (result.get("ipv4_cidrs") or []) + (result.get("ipv6_cidrs") or [])
+        except Exception as exc:
+            self._logger.warning("Failed to fetch Cloudflare IP ranges from %s: %s", url, exc)
+            return []
+        return self._parse_networks(" ".join(cidrs))
 
 
 __plugin_name__ = "Cloudflare Access SSO"
-__plugin_pythoncompat__ = ">=3.7,<4"
+__plugin_pythoncompat__ = ">=3.9,<4"
 
 
 def __plugin_load__():
     global __plugin_implementation__
     __plugin_implementation__ = CloudflareAccessSSOPlugin()
-

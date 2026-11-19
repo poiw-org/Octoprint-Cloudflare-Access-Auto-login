@@ -4,19 +4,17 @@ This plugin enables **Single Sign-On (SSO)** for OctoPrint using **Cloudflare Ze
 
 Instead of authenticating through OctoPrint’s native login system, authentication is delegated to **Cloudflare Access**. The plugin reads a **JWT assertion** injected by Cloudflare into incoming HTTP requests and uses it to authenticate users inside OctoPrint.
 
-If a Cloudflare-authenticated user does not exist in OctoPrint, the plugin automatically creates the user and assigns them the **operator** role.
+If a Cloudflare-authenticated user does not exist in OctoPrint, the plugin creates them on their first visit with OctoPrint's default groups (normally **Operator**) and no password, so they can only sign in through Cloudflare Access. Promote people to admin in OctoPrint's Access Control settings.
+
+Requires **OctoPrint 2.0** or later.
 
 ## Installation
 
-1. Ensure you are running OctoPrint (Python 3).
-2. Install the plugin from source:
-
 ```bash
-cd /path/to/Octoprint-Cloudflare-Access-Auto-login
-~/OctoPrint/venv/bin/pip install .
+~/oprint/bin/pip install https://github.com/donfn/Octoprint-Cloudflare-Access-Auto-login/archive/main.zip
 ```
 
-3. Restart OctoPrint.
+or from a checkout: `~/oprint/bin/pip install .`. Restart OctoPrint.
 
 ## Configuration
 
@@ -25,24 +23,20 @@ In OctoPrint:
 - Open `Settings → Plugins → Cloudflare Access SSO`.
 - Set **Team Domain**, e.g. `example.cloudflareaccess.com`.
 - Set **Audience (AUD)** to the application AUD tag from Cloudflare Zero Trust.
-- Optionally set **Allowed CIDR ranges** for additional trusted networks (comma, space or line separated).
-- Optionally enable **Allow Cloudflare IP ranges** to trust requests coming from Cloudflare's published IPv4/IPv6 ranges.
+- If `cloudflared` doesn't run on the OctoPrint machine itself, add its address under **Allowed CIDR ranges** (comma, space or line separated).
+- If Cloudflare's proxy connects to OctoPrint directly (no tunnel), enable **Allow Cloudflare IP ranges**.
 
 Save and restart OctoPrint.
 
 ## How it works
 
-- For each HTTP request, the plugin runs a `before_request` hook.
-- It only processes requests if the client IP is:
-  - a loopback address (`127.0.0.1` / `::1`), or
-  - within one of the configured **Allowed CIDR ranges**, or
-  - within Cloudflare's published IP ranges (when enabled in settings).
-- It reads the `Cf-Access-Jwt-Assertion` header.
-- The JWT is validated using Cloudflare’s JWKS (`https://<team_domain>/cdn-cgi/access/certs`), audience, and issuer.
-- On successful validation it:
-  - Extracts the `email` and `name` claims.
-  - Creates a user (if missing) with the `operator` role.
-  - Logs the user in via Flask-Login.
+- The plugin adds a request loader to OctoPrint's login manager, next to OctoPrint's own API key and remote user header checks.
+- It reads the `Cf-Access-Jwt-Assertion` header, but only from a trusted peer: the address that connected to OctoPrint must be
+  - a loopback address (`cloudflared` on the same machine), or
+  - within one of the **Allowed CIDR ranges**, or
+  - within Cloudflare's published IP ranges (when enabled).
+- It verifies the JWT's signature against Cloudflare's keys (`https://<team_domain>/cdn-cgi/access/certs`, refetched when Cloudflare rotates them), audience, issuer and expiry.
+- It finds the user named by the `email` claim, creating them if needed, and OctoPrint signs them in.
+- When a later request carries a different Access identity, or none, the OctoPrint session ends.
 
-OctoPrint’s normal permission system then applies.
-
+OctoPrint's normal login keeps working for requests without the header, e.g. on the local network.
