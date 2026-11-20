@@ -63,11 +63,12 @@
         Sign in local connections without a Cloudflare token
       </label>
       <span class="help-block">
-        A visitor without a Cloudflare Access token whose address
-        (<code>X-Forwarded-For</code>) is the printer's own public IP, i.e.
-        someone in the lab, is signed in as an existing OctoPrint user. The
-        printer looks up its public IP every 5 minutes. Visitors with a token
-        still sign in as themselves. Logging out turns it off for that browser
+        A visitor from the lab without a Cloudflare Access token is signed in
+        as an existing OctoPrint user: through the tunnel when their address
+        (<code>X-Forwarded-For</code>) is the printer's own public IP, or
+        directly when they're on one of the printer's own networks (by its
+        local IP, or on the printer itself). Checked every 5 minutes. Visitors
+        with a token still sign in as themselves. Logging out turns it off for that browser
         until the next manual sign-in.
       </span>
     </div>

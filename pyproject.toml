@@ -9,7 +9,7 @@ description = "Signs people in to OctoPrint with the Cloudflare Access JWT, crea
 license = "AGPL-3.0-only"
 readme = { file = "README.md", content-type = "text/markdown" }
 requires-python = ">=3.9,<4"
-dependencies = ["OctoPrint>=2.0.0", "PyJWT[crypto]>=2.8.0", "requests>=2.31.0"]
+dependencies = ["OctoPrint>=2.0.0", "PyJWT[crypto]>=2.8.0", "requests>=2.31.0", "netaddr", "ifaddr"]
 
 [project.urls]
 Homepage = "https://github.com/donfn/Octoprint-Cloudflare-Access-Auto-login"
@@ -21,4 +21,4 @@ cloudflare_access_sso = "octoprint_cloudflare_access_sso"
 include = ["octoprint_cloudflare_access_sso", "octoprint_cloudflare_access_sso.*"]
 
 [tool.setuptools.package-data]
-octoprint_cloudflare_access_sso = ["templates/*"]
+octoprint_cloudflare_access_sso = ["templates/*", "static/js/*"]

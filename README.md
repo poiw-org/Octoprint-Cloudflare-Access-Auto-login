@@ -33,12 +33,17 @@ Save and restart OctoPrint.
 
 ## Local sign-in without a token
 
-Requests that carry no valid Cloudflare Access token are signed in as the local user only when their address is the printer's own public IPv4 address, i.e. they come from the lab, behind the same NAT. This is OctoPrint's own autologin (`accessControl.autologinLocal`, `autologinAs`); the plugin looks up the public IP every 5 minutes (from `https://1.1.1.1/cdn-cgi/trace`) and sets `localNetworks` to that one address, overwriting any subnets there. Subnets can't be configured, so a whole organisation's network can't be let in.
+Requests that carry no valid Cloudflare Access token are signed in as the local user only when they come from the lab:
+
+- through the tunnel, when their address (`X-Forwarded-For`) is the printer's own public IPv4 address, i.e. behind the same NAT, or
+- directly, by the printer's local IP, from a subnet one of the printer's network interfaces is on, or from the printer itself (loopback).
+
+This is OctoPrint's own autologin (`accessControl.autologinLocal`, `autologinAs`). Every 5 minutes the plugin looks up the public IP (from `https://1.1.1.1/cdn-cgi/trace`) and the interface subnets, and sets `localNetworks` to them, overwriting anything there. Subnets can't be configured, so a whole organisation's network can't be let in, unless the printer's own interface is on one (e.g. a large campus subnet, or a VPN interface such as WireGuard, whose peers would count as local). Addresses under **Allowed CIDR ranges** are left out, so a `cloudflared` elsewhere on the LAN doesn't sign everyone in.
 
 - A valid Access token always wins: the visitor signs in as themselves.
 - OctoPrint takes the client address from `X-Forwarded-For` when the request comes through a trusted proxy, so visitors through a `cloudflared` tunnel show their own public IP.
 - If the lookup fails, nobody is signed in this way until it succeeds again.
-- Visitors reaching Cloudflare over IPv6, or opening OctoPrint directly on the LAN (no `X-Forwarded-For`), don't match.
+- Tunnel visitors reaching Cloudflare over IPv6 don't match the public IP.
 - Logging out stops it for that browser until someone signs in by hand again.
 
 ## Roles to groups
@@ -60,5 +65,6 @@ Add `roles` under **OIDC claims** in the Cloudflare identity provider. Cloudflar
 - It verifies the JWT's signature against Cloudflare's keys (`https://<team_domain>/cdn-cgi/access/certs`, refetched when Cloudflare rotates them), audience, issuer and expiry.
 - It finds the user named by the `email` claim, creating them if needed, and OctoPrint signs them in.
 - When a later request carries a different Access identity, or none, the OctoPrint session ends.
+- Logging out of OctoPrint after signing in through Access sends the browser to `/cdn-cgi/access/logout`, which ends the Cloudflare Access session (for all Access applications); otherwise the next request would sign them straight back in.
 
 OctoPrint's normal login keeps working for requests without the header, e.g. on the local network.

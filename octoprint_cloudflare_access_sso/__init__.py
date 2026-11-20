@@ -2,7 +2,9 @@ import ipaddress
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
+import ifaddr
 import jwt
+import netaddr
 import requests
 from flask import request, session
 
@@ -24,6 +26,7 @@ class CloudflareAccessSSOPlugin(
     octoprint.plugin.StartupPlugin,
     octoprint.plugin.SettingsPlugin,
     octoprint.plugin.TemplatePlugin,
+    octoprint.plugin.AssetPlugin,
 ):
     def __init__(self) -> None:
         self._jwks: Optional[jwt.PyJWKClient] = None
@@ -45,7 +48,7 @@ class CloudflareAccessSSOPlugin(
     # Local sign-in without a token is OctoPrint's own autologin (accessControl.autologinLocal),
     # which only runs when nobody is signed in, so a valid Access token always wins, and which
     # respects logging out. The plugin gives its settings a page and keeps localNetworks set to
-    # the printer's own public IP only (see _refresh_lab_ip), never a configurable subnet.
+    # the lab only (see _refresh_local_networks), never a configurable subnet.
     def on_settings_load(self) -> Dict[str, Any]:
         data = octoprint.plugin.SettingsPlugin.on_settings_load(self)
         data["local_autologin"] = self._settings.global_get_boolean(["accessControl", "autologinLocal"])
@@ -66,6 +69,7 @@ class CloudflareAccessSSOPlugin(
         octoprint.plugin.SettingsPlugin.on_settings_save(self, data)
         self._jwks = None
         self._load_network_configuration()
+        self._refresh_local_networks()
 
     ##~~ TemplatePlugin mixin
 
@@ -82,6 +86,11 @@ class CloudflareAccessSSOPlugin(
     def is_template_autoescaped(self):
         return True
 
+    ##~~ AssetPlugin mixin
+
+    def get_assets(self):
+        return {"js": ["js/cloudflare_access_sso.js"]}
+
     ##~~ StartupPlugin mixin
 
     def on_startup(self, host, port):
@@ -96,7 +105,7 @@ class CloudflareAccessSSOPlugin(
             lambda userid: from_session(userid) if self._session_still_valid(userid) else None
         )
         self._load_network_configuration()
-        RepeatedTimer(PUBLIC_IP_REFRESH_SECONDS, self._refresh_lab_ip, run_first=True, daemon=True).start()
+        RepeatedTimer(PUBLIC_IP_REFRESH_SECONDS, self._refresh_local_networks, run_first=True, daemon=True).start()
 
     # ---- Sign-in --------------------------------------------------------
 
@@ -245,26 +254,46 @@ class CloudflareAccessSSOPlugin(
             ip in net for net in self._allowed_networks + self._cloudflare_networks
         )
 
-    def _refresh_lab_ip(self) -> None:
-        """Points OctoPrint's local autologin at the printer's public IPv4 address, so only visitors
-        whose X-Forwarded-For address is that same IP (behind the lab's NAT) are signed in."""
+    def _refresh_local_networks(self) -> None:
+        """Points OctoPrint's local autologin at the lab: the printer's public IPv4 address (tunnel
+        visitors behind the lab's NAT, by X-Forwarded-For) and the subnets of the printer's own
+        network interfaces, loopback included (visitors opening it by its local IP)."""
+        networks = self._interface_networks() | self._public_ip_networks()
+        # A cloudflared elsewhere on the LAN that OctoPrint doesn't trust as a proxy would show up
+        # with its own LAN address and sign every tunnel visitor in, so those peers never count.
+        networks -= netaddr.IPSet(str(net) for net in self._allowed_networks)
+        cidrs = [str(cidr) for cidr in networks.iter_cidrs()]
+
+        if self._settings.global_get(["accessControl", "localNetworks"]) == cidrs:
+            return
+        self._settings.global_set(["accessControl", "localNetworks"], cidrs)
+        self._settings.save()
+        # OctoPrint parses localNetworks once; drop its copy so the change applies without a restart.
+        octoprint.server.util.flask._cached_local_networks = None
+        self._logger.info("Local sign-in now limited to %s", cidrs or "(nothing)")
+
+    def _interface_networks(self) -> "netaddr.IPSet":
+        # Not OctoPrint's get_lan_ranges: that adds every private range (10.0.0.0/8, ...).
+        networks = netaddr.IPSet()
+        for adapter in ifaddr.get_adapters():
+            for ip in adapter.ips:
+                address = ip.ip[0] if ip.is_IPv6 else ip.ip
+                try:
+                    networks.add(netaddr.IPNetwork(f"{address}/{ip.network_prefix}"))
+                except Exception:
+                    self._logger.debug("Skipping interface address %r", ip)
+        return networks
+
+    def _public_ip_networks(self) -> "netaddr.IPSet":
         try:
             resp = requests.get(PUBLIC_IP_URL, timeout=5)
             resp.raise_for_status()
             fields = dict(line.partition("=")[::2] for line in resp.text.splitlines())
-            networks = [f"{ipaddress.IPv4Address(fields.get('ip', '').strip())}/32"]
+            return netaddr.IPSet([str(ipaddress.IPv4Address(fields.get("ip", "").strip()))])
         except Exception as exc:
-            # Fail closed: an unknown lab IP signs nobody in.
+            # Fail closed: an unknown public IP lets no tunnel visitor in.
             self._logger.warning("Could not look up the printer's public IP: %s", exc)
-            networks = []
-
-        if self._settings.global_get(["accessControl", "localNetworks"]) == networks:
-            return
-        self._settings.global_set(["accessControl", "localNetworks"], networks)
-        self._settings.save()
-        # OctoPrint parses localNetworks once; drop its copy so the change applies without a restart.
-        octoprint.server.util.flask._cached_local_networks = None
-        self._logger.info("Local sign-in now limited to the lab IP %s", networks or "(none)")
+            return netaddr.IPSet()
 
     def _fetch_cloudflare_networks(self) -> List[Any]:
         url = "https://api.cloudflare.com/client/v4/ips"
